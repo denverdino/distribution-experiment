@@ -593,6 +593,33 @@ func (d *driver) WriteStream(ctx context.Context, path string, offset int64, rea
 // Stat retrieves the FileInfo for the given path, including the current size
 // in bytes and the creation time.
 func (d *driver) Stat(ctx context.Context, path string) (storagedriver.FileInfo, error) {
+	if strings.HasSuffix(path, "/data") || strings.HasSuffix(path, "/link") {
+		_, err := d.Bucket.Head(d.ossPath(path), nil)
+		if err != nil {
+			ossErr, ok := err.(*oss.Error)
+			if ok && ossErr.StatusCode == http.StatusNotFound {
+				reader, err := d.Bucket.GetReader(d.ossPath(path))
+				if err == nil {
+					writtern, err := io.Copy(ioutil.Discard, reader)
+					logrus.Infof("Copy %s from orgin OSS with %d bytes: %v", path, writtern, err)
+					if err == nil {
+						fi := storagedriver.FileInfoFields{
+							Path:    path,
+							IsDir:   false,
+							Size:    writtern,
+							ModTime: time.Now().UTC(),
+						}
+						return storagedriver.FileInfoInternal{FileInfoFields: fi}, nil
+					}
+				} else {
+					logrus.Warnf("Failed to read %s from orgin OSS: %v", path, err)
+				}
+			} else {
+				logrus.Infof("HEAD %s error: %++v", d.ossPath(path), err)
+			}
+		}
+	}
+
 	listResponse, err := d.Bucket.List(d.ossPath(path), "", "", 1)
 	if err != nil {
 		return nil, err
@@ -618,6 +645,7 @@ func (d *driver) Stat(ctx context.Context, path string) (storagedriver.FileInfo,
 	} else if len(listResponse.CommonPrefixes) == 1 {
 		fi.IsDir = true
 	} else {
+		logrus.Infof("PathNotFoundError in Status %s ...", path)
 		return nil, storagedriver.PathNotFoundError{Path: path}
 	}
 
@@ -732,6 +760,12 @@ func (d *driver) URLFor(ctx context.Context, path string, options map[string]int
 		if !ok || (methodString != "GET") {
 			return "", storagedriver.ErrUnsupportedMethod{}
 		}
+	}
+
+	_, err := d.Bucket.Head(d.ossPath(path), nil)
+	if err != nil {
+		logrus.Infof("Failed to find %s error: %++v", d.ossPath(path), err)
+		return "", storagedriver.ErrUnsupportedMethod{}
 	}
 
 	expiresTime := time.Now().Add(20 * time.Minute)
